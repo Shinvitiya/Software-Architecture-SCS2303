@@ -5,7 +5,7 @@ import threading
 import queue
 import json
 import requests
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Callable
 import time
 
 # ==================== SHARED MODELS AND INTERFACES ====================
@@ -19,7 +19,7 @@ class User:
 
 class Course:
     def __init__(self, course_id: str, name: str, instructor: str, capacity: int, 
-                 enrolled: int = 0, prerequisites: List[str] = None):
+                 enrolled: int = 0, prerequisites: Optional[List[str]] = None):
         self.course_id = course_id
         self.name = name
         self.instructor = instructor
@@ -40,6 +40,9 @@ class EventBus:
     """Singleton Event Bus for microservices communication"""
     _instance = None
     _lock = threading.Lock()
+    # Type declarations to satisfy static checkers
+    subscribers: Dict[str, List[Callable]]
+    event_queue: queue.Queue
     
     def __new__(cls):
         if cls._instance is None:
@@ -141,6 +144,40 @@ class AdminDTOFactory(DTOFactory):
             }
         return {"error": "Unsupported data type"}
 
+# ==================== FACTORY METHOD (ROLE UI FACTORY) ====================
+
+class RoleUIFactory(ABC):
+    @abstractmethod
+    def create_ui(self) -> Dict[str, Any]:
+        pass
+
+class StudentUIFactory(RoleUIFactory):
+    def create_ui(self) -> Dict[str, Any]:
+        return {
+            "role": "student",
+            "menus": ["Dashboard", "Courses", "Enrollments"],
+            "permissions": ["view_courses", "enroll", "drop"],
+            "routes": {"list_courses": "/courses", "enroll": "/enroll", "drop": "/drop"}
+        }
+
+class FacultyUIFactory(RoleUIFactory):
+    def create_ui(self) -> Dict[str, Any]:
+        return {
+            "role": "faculty",
+            "menus": ["My Courses", "Rosters", "Grades"],
+            "permissions": ["view_rosters", "submit_grades"],
+            "routes": {"my_courses": "/my_courses/<faculty_id>", "roster": "/roster/<course_id>", "submit_grades": "/submit_grades"}
+        }
+
+class AdminUIFactory(RoleUIFactory):
+    def create_ui(self) -> Dict[str, Any]:
+        return {
+            "role": "administrator",
+            "menus": ["Courses", "Reports", "System Config"],
+            "permissions": ["create_course", "view_reports", "update_system_config"],
+            "routes": {"courses": "/courses", "create_course": "/course", "report": "/reports/enrollment", "config": "/config"}
+        }
+
 # ==================== DESIGN PATTERN 3: STRATEGY PATTERN ====================
 
 class ValidationStrategy(ABC):
@@ -209,38 +246,103 @@ class ValidationContext:
                 break  # Stop on first validation failure
         return results
 
+# ==================== STRATEGY PATTERN FOR GRADES ====================
+
+class GradeProcessingStrategy(ABC):
+    @abstractmethod
+    def process(self, grades_data: List[Dict[str, Any]]) -> Dict[str, Any]:
+        pass
+
+class LetterGradeStrategy(GradeProcessingStrategy):
+    VALID = {"A", "A-", "B+", "B", "B-", "C+", "C", "C-", "D", "F"}
+
+    def process(self, grades_data: List[Dict[str, Any]]) -> Dict[str, Any]:
+        invalid = [g for g in grades_data if g.get("grade") not in self.VALID]
+        return {
+            "scheme": "letter",
+            "valid": len(invalid) == 0,
+            "invalid_entries": invalid
+        }
+
+class PassFailGradeStrategy(GradeProcessingStrategy):
+    VALID = {"P", "F"}
+
+    def process(self, grades_data: List[Dict[str, Any]]) -> Dict[str, Any]:
+        invalid = [g for g in grades_data if g.get("grade") not in self.VALID]
+        return {
+            "scheme": "pass_fail",
+            "valid": len(invalid) == 0,
+            "invalid_entries": invalid
+        }
+
+class GradeProcessor:
+    def __init__(self, strategy: GradeProcessingStrategy):
+        self.strategy = strategy
+    
+    def process(self, grades_data: List[Dict[str, Any]]) -> Dict[str, Any]:
+        return self.strategy.process(grades_data)
+
+# ==================== ADMIN NOTIFICATION FACTORY ====================
+
+class NotificationFactory(ABC):
+    @abstractmethod
+    def create(self, notification_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
+        pass
+
+class AdminNotificationFactory(NotificationFactory):
+    def create(self, notification_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
+        base: Dict[str, Any] = {"type": notification_type, "timestamp": datetime.now().isoformat()}
+        if notification_type == "system_config_updated":
+            base["message"] = data.get("message", "System configuration updated")
+            base["recipients"] = ["students", "faculty", "administrators"]
+        elif notification_type == "course_created":
+            base["message"] = f"Course {data.get('course_id')} created"
+            base["recipients"] = ["administrators", "faculty"]
+        else:
+            base["message"] = data.get("message", "Notification")
+        return base
+
 # ==================== NOTIFICATION SERVICE ====================
 
 class NotificationService:
     def __init__(self):
         self.event_bus = EventBus()
         self._setup_event_subscriptions()
-    
+
     def _setup_event_subscriptions(self):
         # Observer pattern: Subscribe to various events
         self.event_bus.subscribe("student_enrolled", self._handle_enrollment_notification)
         self.event_bus.subscribe("student_dropped", self._handle_drop_notification)
         self.event_bus.subscribe("grade_submitted", self._handle_grade_notification)
         self.event_bus.subscribe("course_created", self._handle_course_created_notification)
-    
+        self.event_bus.subscribe("system_config_updated", self._handle_system_config_notification)
+
     def _handle_enrollment_notification(self, event: Event):
         data = event.data
         print(f"NOTIFICATION: Student {data['student_id']} enrolled in {data['course_id']}")
         print(f"   → Notifying advisor: {data.get('advisor_email', 'advisor@university.edu')}")
         print(f"   → Updating billing system for course fees")
-    
+
     def _handle_drop_notification(self, event: Event):
         data = event.data
         print(f"NOTIFICATION: Student {data['student_id']} dropped {data['course_id']}")
         print(f"   → Notifying waitlisted students")
-    
+
     def _handle_grade_notification(self, event: Event):
         data = event.data
         print(f"NOTIFICATION: Grade {data['grade']} submitted for student {data['student_id']} in {data['course_id']}")
-    
+        print(f"   → Emailing student {data['student_id']}")
+        print(f"   → Informing department administrator")
+
     def _handle_course_created_notification(self, event: Event):
         data = event.data
         print(f"NOTIFICATION: New course {data['course_id']} created by admin")
+
+    def _handle_system_config_notification(self, event: Event):
+        data = event.data
+        msg = data.get("message", "Configuration changed")
+        print(f"SYSTEM CONFIG UPDATE: {msg}")
+        print("   → Notifying all stakeholders: students, faculty, administrators")
 
 # ==================== STUDENT SERVICE ====================
 
@@ -249,15 +351,16 @@ class StudentService:
         self.app = Flask(__name__)
         self.port = port
         self.dto_factory = StudentDTOFactory()
+        self.ui_factory = StudentUIFactory()
         self.event_bus = EventBus()
-        
+
         # Mock data
         self.courses = {
             "CS101": Course("CS101", "Intro to Programming", "Dr. Smith", 30, 25, []),
             "CS201": Course("CS201", "Data Structures", "Dr. Johnson", 25, 20, ["CS101"]),
             "CS301": Course("CS301", "Algorithms", "Dr. Brown", 20, 15, ["CS101", "CS201"])
         }
-        
+
         self.student_data = {
             "STU001": {
                 "completed_courses": ["CS101"],
@@ -265,10 +368,14 @@ class StudentService:
                 "enrollment_history": []
             }
         }
-        
+
         self._setup_routes()
     
     def _setup_routes(self):
+        @self.app.route('/ui', methods=['GET'])
+        def get_ui():
+            return jsonify(self.ui_factory.create_ui())
+
         @self.app.route('/courses', methods=['GET'])
         def get_courses():
             """Get all available courses (Factory Method Pattern)"""
@@ -279,9 +386,11 @@ class StudentService:
         @self.app.route('/enroll', methods=['POST'])
         def enroll_student():
             """Enroll student in course (Strategy Pattern + Observer Pattern)"""
-            data = request.json
+            data = request.get_json(silent=True) or {}
             student_id = data.get('student_id')
             course_id = data.get('course_id')
+            if not isinstance(student_id, str) or not isinstance(course_id, str):
+                return jsonify({"error": "Invalid payload"}), 400
             
             course = self.courses.get(course_id)
             if not course:
@@ -289,7 +398,9 @@ class StudentService:
             
             # Strategy Pattern: Validate enrollment
             validator = ValidationContext()
-            validator.add_strategy(PrerequisiteValidationStrategy())
+            # Add prerequisite strategy only if applicable to the course
+            if course.prerequisites:
+                validator.add_strategy(PrerequisiteValidationStrategy())
             validator.add_strategy(CapacityValidationStrategy())
             validator.add_strategy(ScheduleConflictValidationStrategy())
             
@@ -339,9 +450,11 @@ class StudentService:
         @self.app.route('/drop', methods=['POST'])
         def drop_course():
             """Drop a course (Observer Pattern)"""
-            data = request.json
+            data = request.get_json(silent=True) or {}
             student_id = data.get('student_id')
             course_id = data.get('course_id')
+            if not isinstance(student_id, str) or not isinstance(course_id, str):
+                return jsonify({"error": "Invalid payload"}), 400
             
             course = self.courses.get(course_id)
             if not course:
@@ -373,24 +486,33 @@ class FacultyService:
         self.app = Flask(__name__)
         self.port = port
         self.dto_factory = FacultyDTOFactory()
+        self.ui_factory = FacultyUIFactory()
         self.event_bus = EventBus()
-        
+
         # Mock data
         self.courses = {
             "CS101": Course("CS101", "Intro to Programming", "Dr. Smith", 30, 25),
             "CS201": Course("CS201", "Data Structures", "Dr. Johnson", 25, 20)
         }
-        
+
         self.rosters = {
             "CS101": ["STU001", "STU002", "STU003"],
             "CS201": ["STU001", "STU004", "STU005"]
         }
-        
+
         self.grades = {}
-        
+
+        # Subscribe to enrollment/drop events to keep rosters updated (Observer)
+        self.event_bus.subscribe("student_enrolled", self._on_student_enrolled)
+        self.event_bus.subscribe("student_dropped", self._on_student_dropped)
+
         self._setup_routes()
     
     def _setup_routes(self):
+        @self.app.route('/ui', methods=['GET'])
+        def get_ui():
+            return jsonify(self.ui_factory.create_ui())
+
         @self.app.route('/roster/<course_id>', methods=['GET'])
         def get_roster(course_id):
             """Get class roster (Factory Method Pattern)"""
@@ -408,12 +530,23 @@ class FacultyService:
         @self.app.route('/submit_grades', methods=['POST'])
         def submit_grades():
             """Submit grades for a course (Observer Pattern)"""
-            data = request.json
+            data = request.get_json(silent=True) or {}
             course_id = data.get('course_id')
             grades_data = data.get('grades')  # List of {student_id, grade}
             
             if course_id not in self.courses:
                 return jsonify({"error": "Course not found"}), 404
+            if not isinstance(grades_data, list):
+                return jsonify({"error": "Invalid grades payload"}), 400
+
+            # Strategy Pattern: grade processing (letter vs pass/fail)
+            strategy: GradeProcessingStrategy = LetterGradeStrategy()
+            if course_id.startswith("PF"):
+                strategy = PassFailGradeStrategy()
+            processor = GradeProcessor(strategy)
+            processed = processor.process(grades_data)
+            if not processed["valid"]:
+                return jsonify({"success": False, "error": "Invalid grade entries", "details": processed}), 400
             
             # Store grades
             if course_id not in self.grades:
@@ -434,7 +567,8 @@ class FacultyService:
             
             return jsonify({
                 "success": True,
-                "message": f"Grades submitted for {len(grades_data)} students in {course_id}"
+                "message": f"Grades submitted for {len(grades_data)} students in {course_id}",
+                "processing": processed
             })
         
         @self.app.route('/my_courses/<faculty_id>', methods=['GET'])
@@ -448,6 +582,27 @@ class FacultyService:
                 response_courses.append(self.dto_factory.create_response_dto(course))
             
             return jsonify({"courses": response_courses})
+
+    # Observer callbacks within FacultyService
+    def _on_student_enrolled(self, event: Event):
+        data = event.data
+        cid = data.get("course_id")
+        sid = data.get("student_id")
+        if not isinstance(cid, str) or not isinstance(sid, str):
+            return
+        if cid in self.rosters and sid not in self.rosters[cid]:
+            self.rosters[cid].append(sid)
+            print(f"FACULTY SERVICE: Added {sid} to roster for {cid}")
+
+    def _on_student_dropped(self, event: Event):
+        data = event.data
+        cid = data.get("course_id")
+        sid = data.get("student_id")
+        if not isinstance(cid, str) or not isinstance(sid, str):
+            return
+        if cid in self.rosters and sid in self.rosters[cid]:
+            self.rosters[cid].remove(sid)
+            print(f"FACULTY SERVICE: Removed {sid} from roster for {cid}")
     
     def run(self):
         print(f"Faculty Service running on port {self.port}")
@@ -460,18 +615,24 @@ class AdminService:
         self.app = Flask(__name__)
         self.port = port
         self.dto_factory = AdminDTOFactory()
+        self.ui_factory = AdminUIFactory()
+        self.notification_factory = AdminNotificationFactory()
         self.event_bus = EventBus()
-        
+
         # Mock data
         self.courses = {
             "CS101": Course("CS101", "Intro to Programming", "Dr. Smith", 30, 25),
             "CS201": Course("CS201", "Data Structures", "Dr. Johnson", 25, 20),
             "CS301": Course("CS301", "Algorithms", "Dr. Brown", 20, 15)
         }
-        
+
         self._setup_routes()
     
     def _setup_routes(self):
+        @self.app.route('/ui', methods=['GET'])
+        def get_ui():
+            return jsonify(self.ui_factory.create_ui())
+
         @self.app.route('/courses', methods=['GET'])
         def get_all_courses():
             """Get all courses with admin view (Factory Method Pattern)"""
@@ -482,25 +643,47 @@ class AdminService:
         @self.app.route('/course', methods=['POST'])
         def create_course():
             """Create a new course (Observer Pattern)"""
-            data = request.json
+            data = request.get_json(silent=True) or {}
             course_id = data.get('course_id')
             name = data.get('name')
             instructor = data.get('instructor')
             capacity = data.get('capacity', 20)
             prerequisites = data.get('prerequisites', [])
+            # Validate and narrow types
+            if not isinstance(course_id, str):
+                return jsonify({"error": "Invalid payload: course_id"}), 400
+            if not isinstance(name, str):
+                return jsonify({"error": "Invalid payload: name"}), 400
+            if not isinstance(instructor, str):
+                return jsonify({"error": "Invalid payload: instructor"}), 400
+            if not isinstance(capacity, int):
+                try:
+                    capacity = int(capacity)
+                except Exception:
+                    capacity = 20
+            if not isinstance(prerequisites, list):
+                prerequisites = []
+            else:
+                prerequisites = [str(p) for p in prerequisites]
+
+            course_id_str: str = course_id
+            name_str: str = name
+            instructor_str: str = instructor
             
-            if course_id in self.courses:
+            if course_id_str in self.courses:
                 return jsonify({"error": "Course already exists"}), 400
             
-            new_course = Course(course_id, name, instructor, capacity, 0, prerequisites)
-            self.courses[course_id] = new_course
+            new_course = Course(course_id_str, name_str, instructor_str, capacity, 0, prerequisites)
+            self.courses[course_id_str] = new_course
             
             # Observer Pattern: Publish course creation event
-            event = Event("course_created", {
+            payload = {
                 "course_id": course_id,
                 "name": name,
-                "instructor": instructor
-            })
+                "instructor": instructor,
+                "notification": self.notification_factory.create("course_created", {"course_id": course_id})
+            }
+            event = Event("course_created", payload)
             self.event_bus.publish(event)
             
             response = self.dto_factory.create_response_dto(new_course)
@@ -535,6 +718,17 @@ class AdminService:
             
             response = self.dto_factory.create_response_dto(report_data)
             return jsonify(response)
+
+        @self.app.route('/config', methods=['POST'])
+        def update_system_config():
+            """Simulate a system-wide configuration change (Observer Pattern + Factory Method for notifications)."""
+            data = request.get_json(silent=True) or {}
+            message = data.get('message', 'System maintenance scheduled')
+            notification = self.notification_factory.create("system_config_updated", {"message": message})
+            # Publish a system-wide change event
+            event = Event("system_config_updated", {"message": message, "notification": notification})
+            self.event_bus.publish(event)
+            return jsonify({"success": True, "message": message})
     
     def run(self):
         print(f"Admin Service running on port {self.port}")
@@ -564,6 +758,14 @@ def demo_system():
     }
     
     try:
+        # 0. Fetch role-based UIs (Factory Method: UI creation)
+        print("\n0. Fetching role-based UIs...")
+        ui_student = requests.get(f"{base_urls['student']}/ui").json()
+        ui_faculty = requests.get(f"{base_urls['faculty']}/ui").json()
+        ui_admin = requests.get(f"{base_urls['admin']}/ui").json()
+        print(f"   Student UI menus: {ui_student['menus']}")
+        print(f"   Faculty UI menus: {ui_faculty['menus']}")
+        print(f"   Admin UI menus: {ui_admin['menus']}")
         # 1. Admin creates a new course
         print("\n1. ADMIN: Creating a new course...")
         admin_response = requests.post(f"{base_urls['admin']}/course", json={
@@ -620,12 +822,19 @@ def demo_system():
         print(f"   Overall Utilization: {report_data['summary']['overall_utilization']}%")
         
         # 8. Student drops a course
-        print("\n8.: Dropping CS201...")
+        print("\n8. STUDENT: Dropping CS201...")
         drop_response = requests.post(f"{base_urls['student']}/drop", json={
             "student_id": "STU001",
             "course_id": "CS201"
         })
         print(f"   Response: {drop_response.json()}")
+        
+        # 9. Admin performs a system-wide configuration update
+        print("\n9. ADMIN: Updating system configuration...")
+        cfg_response = requests.post(f"{base_urls['admin']}/config", json={
+            "message": "System will undergo maintenance at 11 PM"
+        })
+        print(f"   Response: {cfg_response.json()}")
         
     except requests.exceptions.ConnectionError as e:
         print(f"Connection error: {e}")
