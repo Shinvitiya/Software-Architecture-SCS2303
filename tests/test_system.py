@@ -5,7 +5,6 @@ import importlib.util
 from pathlib import Path
 
 
-# main.py is one directory up from this tests/ folder
 MAIN_PY = Path(__file__).resolve().parents[1] / "main.py"
 
 
@@ -14,7 +13,7 @@ def load_main_module():
     assert spec is not None
     mod = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
-    spec.loader.exec_module(mod)  # type: ignore[attr-defined]
+    spec.loader.exec_module(mod)
     return mod
 
 
@@ -32,7 +31,7 @@ def wait_for_ready(url: str, timeout: float = 10.0):
             r = requests.get(url, timeout=1.5)
             if r.status_code in (200, 404):
                 return True
-        except Exception as e:  # pragma: no cover
+        except Exception as e: 
             last_err = e
         time.sleep(0.2)
     raise AssertionError(f"Service at {url} not ready: {last_err}")
@@ -40,7 +39,6 @@ def wait_for_ready(url: str, timeout: float = 10.0):
 
 def setup_services():
     mod = load_main_module()
-    # Initialize NotificationService to wire up EventBus observers
     _notif = mod.NotificationService()
     student = mod.StudentService(port=5101)
     faculty = mod.FacultyService(port=5102)
@@ -52,7 +50,6 @@ def setup_services():
         run_service_in_thread(admin),
     ]
 
-    # Wait for /ui endpoints to be reachable
     wait_for_ready("http://localhost:5101/ui")
     wait_for_ready("http://localhost:5102/ui")
     wait_for_ready("http://localhost:5103/ui")
@@ -105,7 +102,7 @@ def test_end_to_end_system():
     # 4) Student: list courses
     courses = requests.get(f"{base['student']}/courses", timeout=5).json()
     assert "courses" in courses and isinstance(courses["courses"], list)
-    assert any(c.get("course_id") == "CS101" for c in courses["courses"])  # seed present
+    assert any(c.get("course_id") == "CS101" for c in courses["courses"]) 
 
     # 5) Student: enroll success (Observer + Strategy validations)
     enroll = requests.post(

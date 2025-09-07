@@ -476,7 +476,7 @@ class StudentService:
             return jsonify({"error": "Student not enrolled in this course"}), 400
     
     def run(self):
-        print(f"🎓 Student Service running on port {self.port}")
+        print(f"Student Service running on port {self.port}")
         self.app.run(port=self.port, debug=False, use_reloader=False)
 
 # ==================== FACULTY SERVICE ====================
@@ -745,7 +745,7 @@ def run_service_in_thread(service):
 def demo_system():
     """Demonstrate the system functionality"""
     print("\n" + "="*60)
-    print("🎓 NEXUS ENROLL SYSTEM DEMO")
+    print("NEXUS ENROLL SYSTEM DEMO")
     print("="*60)
     
     # Wait for services to start
